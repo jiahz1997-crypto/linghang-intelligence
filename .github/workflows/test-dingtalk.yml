@@ -1,12 +1,16 @@
-name: 领航智库资讯采集
+name: 领航智库每日资讯
 
 on:
   workflow_dispatch:
+
   schedule:
-    # 每天北京时间 08:30、18:00 自动运行
-    # GitHub 使用 UTC 时间，所以北京时间需要减 8 小时
+    # 北京时间 08:30
     - cron: "30 0 * * *"
+
+    # 北京时间 12:30
     - cron: "30 4 * * *"
+
+    # 北京时间 18:00
     - cron: "0 10 * * *"
 
 jobs:
@@ -20,157 +24,553 @@ jobs:
       - name: 采集资讯并推送钉钉
         env:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+
         run: |
           python - <<'PY'
+
           import json
           import os
+          import re
           import urllib.request
+          import urllib.parse
           import xml.etree.ElementTree as ET
           from datetime import datetime, timezone, timedelta
 
+
+          # ============================================================
+          # 基础配置
+          # ============================================================
+
           webhook = os.environ["DINGTALK_WEBHOOK"]
 
-          # =========================
-          # 资讯源
-          # =========================
+          MAX_PER_CATEGORY = 5
+
+          # 北京时间
+          beijing_tz = timezone(timedelta(hours=8))
+
+          now = datetime.now(beijing_tz)
+
+          today = now.strftime("%Y年%m月%d日")
+          current_time = now.strftime("%H:%M")
+
+
+          # ============================================================
+          # Google News RSS 搜索链接生成器
+          # ============================================================
+
+          def google_news_url(query):
+              encoded_query = urllib.parse.quote(query)
+
+              return (
+                  "https://news.google.com/rss/search?"
+                  f"q={encoded_query}"
+                  "&hl=zh-CN"
+                  "&gl=CN"
+                  "&ceid=CN:zh-Hans"
+              )
+
+
+          # ============================================================
+          # 资讯分类
+          # ============================================================
 
           feeds = {
-              "AI/科技": [
-                  "https://news.google.com/rss/search?q=AI+artificial+intelligence&hl=en-US&gl=US&ceid=US:en",
-                  "https://news.google.com/rss/search?q=OpenAI+OR+Anthropic+OR+NVIDIA&hl=en-US&gl=US&ceid=US:en",
+
+              "🌍 一、全球重要时政": [
+
+                  "特朗普 美国 政策",
+                  "美国 政府 政策 国际",
+                  "中美关系",
+                  "美国 关税 贸易",
+                  "俄乌局势",
+                  "俄罗斯 乌克兰",
+                  "中东局势",
+                  "伊朗 以色列",
+                  "巴以冲突",
+                  "欧盟 政策",
+                  "G7 国际",
+                  "G20 国际",
+                  "北约 国际",
+                  "亚太 国际",
+                  "国际局势"
               ],
 
-              "国内科技政策": [
-                  "https://news.google.com/rss/search?q=中国+人工智能+政策&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-                  "https://news.google.com/rss/search?q=人工智能+工信部+科技部&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+
+              "🇨🇳 二、国内科技政策": [
+
+                  "人工智能 政策 中国",
+                  "人工智能 政策 工信部",
+                  "人工智能 政策 科技部",
+                  "人工智能 产业 政策",
+                  "生成式人工智能 政策",
+                  "人工智能+ 政策",
+                  "智能制造 政策",
+                  "机器人 政策 中国",
+                  "数字经济 政策",
+                  "算力 政策 中国",
+                  "科技创新 政策",
+                  "十五五 科技 人工智能"
               ],
 
-              "重点企业": [
-                  "https://news.google.com/rss/search?q=%22湖南新云医疗装备工业有限公司%22&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-                  "https://news.google.com/rss/search?q=%22河南云联牧场食材供应链管理有限公司%22&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+
+              "🤖 三、AI / 智能行业": [
+
+                  "人工智能 AI",
+                  "生成式人工智能",
+                  "大模型",
+                  "AI Agent 智能体",
+                  "人工智能 智能体",
+                  "人形机器人",
+                  "具身智能",
+                  "智能制造",
+                  "AI 医疗",
+                  "AI 企业应用",
+                  "AI 算力",
+                  "AI 芯片",
+                  "人工智能 产业"
+              ],
+
+
+              "🏢 四、AI重点企业": [
+
+                  "OpenAI",
+                  "Anthropic",
+                  "NVIDIA 英伟达",
+                  "Google DeepMind",
+                  "Microsoft 微软 人工智能",
+                  "Meta 人工智能",
+                  "xAI 马斯克",
+                  "Tesla 特斯拉 AI",
+                  "Amazon 亚马逊 AI",
+                  "百度 AI",
+                  "阿里 AI",
+                  "腾讯 AI",
+                  "字节跳动 AI",
+                  "DeepSeek",
+                  "智谱 AI",
+                  "月之暗面 Kimi"
+              ],
+
+
+              "🏭 五、重点关注企业": [
+
+                  "湖南新云医疗装备工业有限公司",
+                  "河南云联牧场食材供应链管理有限公司"
               ]
           }
 
-          # =========================
-          # 抓取 RSS
-          # =========================
 
-          all_news = []
+          # ============================================================
+          # 关键词过滤
+          # 避免明显无关内容
+          # ============================================================
 
-          for category, urls in feeds.items():
+          blocked_keywords = [
 
-              for url in urls:
+              "招聘",
+              "招聘会",
+              "广告",
+              "优惠",
+              "促销",
+              "购物",
+              "彩票",
+              "游戏攻略",
+              "明星八卦",
+              "娱乐八卦",
+              "体育比赛",
+              "电影票",
+              "旅游攻略"
+          ]
+
+
+          # ============================================================
+          # 获取 RSS
+          # ============================================================
+
+          def fetch_rss(url):
+
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "User-Agent": "Mozilla/5.0"
+                  }
+              )
+
+              with urllib.request.urlopen(
+                  request,
+                  timeout=20
+              ) as response:
+
+                  return response.read()
+
+
+          # ============================================================
+          # 清理标题
+          # ============================================================
+
+          def clean_title(title):
+
+              title = title.strip()
+
+              # Google News 有时会出现：
+              # 标题 - 来源媒体
+              # 保留标题主体
+              if " - " in title:
+
+                  parts = title.rsplit(" - ", 1)
+
+                  if len(parts) == 2:
+
+                      title = parts[0].strip()
+
+              return title
+
+
+          # ============================================================
+          # 判断是否应该过滤
+          # ============================================================
+
+          def should_block(title):
+
+              title_lower = title.lower()
+
+              for keyword in blocked_keywords:
+
+                  if keyword.lower() in title_lower:
+
+                      return True
+
+              return False
+
+
+          # ============================================================
+          # 抓取新闻
+          # ============================================================
+
+          news_by_category = {}
+
+          all_titles = set()
+
+
+          for category, queries in feeds.items():
+
+              news_by_category[category] = []
+
+              for query in queries:
 
                   try:
-                      request = urllib.request.Request(
-                          url,
-                          headers={
-                              "User-Agent": "Mozilla/5.0"
-                          }
-                      )
 
-                      with urllib.request.urlopen(request, timeout=20) as response:
-                          xml_data = response.read()
+                      url = google_news_url(query)
+
+                      xml_data = fetch_rss(url)
 
                       root = ET.fromstring(xml_data)
 
-                      for item in root.findall(".//item")[:10]:
+                      items = root.findall(".//item")
 
-                          title = item.findtext("title", "").strip()
-                          link = item.findtext("link", "").strip()
+                      for item in items[:8]:
 
-                          if title and link:
-                              all_news.append({
-                                  "category": category,
-                                  "title": title,
-                                  "link": link
-                              })
+                          raw_title = item.findtext(
+                              "title",
+                              ""
+                          ).strip()
+
+                          link = item.findtext(
+                              "link",
+                              ""
+                          ).strip()
+
+                          pub_date = item.findtext(
+                              "pubDate",
+                              ""
+                          ).strip()
+
+
+                          if not raw_title or not link:
+
+                              continue
+
+
+                          title = clean_title(raw_title)
+
+
+                          if should_block(title):
+
+                              continue
+
+
+                          # 全局去重
+                          normalized_title = re.sub(
+                              r"\s+",
+                              "",
+                              title.lower()
+                          )
+
+
+                          if normalized_title in all_titles:
+
+                              continue
+
+
+                          all_titles.add(normalized_title)
+
+
+                          news_by_category[category].append({
+
+                              "title": title,
+
+                              "link": link,
+
+                              "pub_date": pub_date
+
+                          })
+
+
+                          if len(
+                              news_by_category[category]
+                          ) >= MAX_PER_CATEGORY:
+
+                              break
+
 
                   except Exception as e:
-                      print(f"RSS采集失败: {url}")
-                      print(e)
 
-          # =========================
-          # 去重
-          # =========================
+                      print(
+                          f"资讯源采集失败：{category} / {query}"
+                      )
 
-          unique_news = []
-          seen = set()
+                      print(str(e))
 
-          for news in all_news:
 
-              key = news["title"]
+          # ============================================================
+          # 企业特别处理
+          #
+          # 如果企业没有抓到新闻，也必须显示“暂无公开重要资讯”
+          # ============================================================
 
-              if key not in seen:
-                  seen.add(key)
-                  unique_news.append(news)
+          company_category = "🏭 五、重点关注企业"
 
-          # =========================
-          # 最多推送20条
-          # =========================
+          companies = [
 
-          unique_news = unique_news[:20]
+              "湖南新云医疗装备工业有限公司",
 
-          # =========================
-          # 生成钉钉消息
-          # =========================
+              "河南云联牧场食材供应链管理有限公司"
 
-          now = datetime.now(
-              timezone(timedelta(hours=8))
-          ).strftime("%Y-%m-%d %H:%M")
+          ]
 
-          content = f"【领航智库·每日资讯】\n\n"
-          content += f"更新时间：{now}\n\n"
 
-          if not unique_news:
+          company_results = {}
 
-              content += "暂未采集到新的资讯。"
 
-          else:
+          for company in companies:
 
-              current_category = ""
+              company_results[company] = []
 
-              for i, news in enumerate(unique_news, 1):
+              for item in news_by_category.get(
+                  company_category,
+                  []
+              ):
 
-                  if news["category"] != current_category:
+                  if company in item["title"]:
 
-                      current_category = news["category"]
+                      company_results[company].append(item)
 
-                      content += f"\n【{current_category}】\n"
 
-                  content += f"{i}. {news['title']}\n"
-                  content += f"{news['link']}\n\n"
+          # ============================================================
+          # 构建钉钉消息
+          # ============================================================
 
-          # =========================
-          # 推送钉钉
-          # =========================
+          content = ""
+
+          content += "【领航智库·每日资讯】\n\n"
+
+          content += f"📅 {today}\n"
+
+          content += f"⏰ 更新时间：{current_time}\n"
+
+          content += "\n"
+
+
+          # ============================================================
+          # 分类输出
+          # ============================================================
+
+          category_order = [
+
+              "🌍 一、全球重要时政",
+
+              "🇨🇳 二、国内科技政策",
+
+              "🤖 三、AI / 智能行业",
+
+              "🏢 四、AI重点企业",
+
+              "🏭 五、重点关注企业"
+
+          ]
+
+
+          for category in category_order:
+
+              content += "━━━━━━━━━━━━\n"
+
+              content += f"{category}\n"
+
+              content += "━━━━━━━━━━━━\n\n"
+
+
+              # --------------------------------------------------------
+              # 企业分类特殊处理
+              # --------------------------------------------------------
+
+              if category == company_category:
+
+                  for company in companies:
+
+                      content += f"【{company}】\n\n"
+
+                      results = company_results.get(
+                          company,
+                          []
+                      )
+
+
+                      if results:
+
+                          for index, item in enumerate(
+                              results[:3],
+                              1
+                          ):
+
+                              content += (
+                                  f"{index}. "
+                                  f"{item['title']}\n"
+                              )
+
+                              content += (
+                                  f"🔗 {item['link']}\n\n"
+                              )
+
+                      else:
+
+                          content += (
+                              "今日暂无公开重要资讯。\n\n"
+                          )
+
+
+                  continue
+
+
+              # --------------------------------------------------------
+              # 普通分类
+              # --------------------------------------------------------
+
+              results = news_by_category.get(
+                  category,
+                  []
+              )
+
+
+              if not results:
+
+                  content += (
+                      "今日暂无重要资讯。\n\n"
+                  )
+
+                  continue
+
+
+              for index, item in enumerate(
+                  results[:MAX_PER_CATEGORY],
+                  1
+              ):
+
+                  content += (
+                      f"{index}. "
+                      f"{item['title']}\n"
+                  )
+
+                  content += (
+                      f"🔗 {item['link']}\n\n"
+                  )
+
+
+          # ============================================================
+          # 结尾
+          # ============================================================
+
+          content += "━━━━━━━━━━━━\n"
+
+          content += (
+              "以上资讯由系统自动采集整理，"
+              "建议点击原文进一步核实。\n"
+          )
+
+
+          # ============================================================
+          # 防止钉钉消息过长
+          # ============================================================
+
+          MAX_MESSAGE_LENGTH = 18000
+
+          if len(content) > MAX_MESSAGE_LENGTH:
+
+              content = (
+                  content[:MAX_MESSAGE_LENGTH]
+                  + "\n\n……更多资讯因消息长度限制未显示。"
+              )
+
+
+          # ============================================================
+          # 发送钉钉
+          # ============================================================
 
           message = {
+
               "msgtype": "text",
+
               "text": {
+
                   "content": content
+
               }
+
           }
+
 
           data = json.dumps(
               message,
               ensure_ascii=False
           ).encode("utf-8")
 
+
           request = urllib.request.Request(
+
               webhook,
+
               data=data,
+
               headers={
                   "Content-Type": "application/json"
               },
+
               method="POST"
+
           )
 
-          with urllib.request.urlopen(request) as response:
 
-              result = response.read().decode("utf-8")
+          with urllib.request.urlopen(
+              request,
+              timeout=20
+          ) as response:
 
-              print("钉钉推送结果：")
+              result = response.read().decode(
+                  "utf-8"
+              )
+
+              print("钉钉推送成功：")
+
               print(result)
+
 
           PY
