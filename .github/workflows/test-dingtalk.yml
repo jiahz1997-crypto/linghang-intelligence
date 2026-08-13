@@ -1,0 +1,41 @@
+name: Test DingTalk
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-dingtalk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send test message to DingTalk
+        env:
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          webhook = os.environ["DINGTALK_WEBHOOK"]
+
+          message = {
+              "msgtype": "text",
+              "text": {
+                  "content": "【领航智库自动化测试】\n\nGitHub Actions 云端运行成功！\n\n这意味着以后即使电脑关机，也可以由 GitHub 云端自动执行资讯采集和推送。"
+              }
+          }
+
+          data = json.dumps(message).encode("utf-8")
+
+          request = urllib.request.Request(
+              webhook,
+              data=data,
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+
+          with urllib.request.urlopen(request) as response:
+              result = response.read().decode("utf-8")
+              print(result)
+          PY
