@@ -1,14 +1,23 @@
-name: Test DingTalk
+name: 领航智库资讯采集
 
 on:
   workflow_dispatch:
+  schedule:
+    # 每天北京时间 08:30、12:30、18:00 自动运行
+    # GitHub 使用 UTC 时间，所以北京时间需要减 8 小时
+    - cron: "30 0 * * *"
+    - cron: "30 4 * * *"
+    - cron: "0 10 * * *"
 
 jobs:
-  test-dingtalk:
+  collect-news:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Send test message to DingTalk
+      - name: 获取代码
+        uses: actions/checkout@v4
+
+      - name: 采集资讯并推送钉钉
         env:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
         run: |
@@ -16,26 +25,152 @@ jobs:
           import json
           import os
           import urllib.request
+          import xml.etree.ElementTree as ET
+          from datetime import datetime, timezone, timedelta
 
           webhook = os.environ["DINGTALK_WEBHOOK"]
+
+          # =========================
+          # 资讯源
+          # =========================
+
+          feeds = {
+              "AI/科技": [
+                  "https://news.google.com/rss/search?q=AI+artificial+intelligence&hl=en-US&gl=US&ceid=US:en",
+                  "https://news.google.com/rss/search?q=OpenAI+OR+Anthropic+OR+NVIDIA&hl=en-US&gl=US&ceid=US:en",
+              ],
+
+              "国内科技政策": [
+                  "https://news.google.com/rss/search?q=中国+人工智能+政策&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+                  "https://news.google.com/rss/search?q=人工智能+工信部+科技部&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+              ],
+
+              "重点企业": [
+                  "https://news.google.com/rss/search?q=%22湖南新云医疗装备工业有限公司%22&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+                  "https://news.google.com/rss/search?q=%22河南云联牧场食材供应链管理有限公司%22&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+              ]
+          }
+
+          # =========================
+          # 抓取 RSS
+          # =========================
+
+          all_news = []
+
+          for category, urls in feeds.items():
+
+              for url in urls:
+
+                  try:
+                      request = urllib.request.Request(
+                          url,
+                          headers={
+                              "User-Agent": "Mozilla/5.0"
+                          }
+                      )
+
+                      with urllib.request.urlopen(request, timeout=20) as response:
+                          xml_data = response.read()
+
+                      root = ET.fromstring(xml_data)
+
+                      for item in root.findall(".//item")[:10]:
+
+                          title = item.findtext("title", "").strip()
+                          link = item.findtext("link", "").strip()
+
+                          if title and link:
+                              all_news.append({
+                                  "category": category,
+                                  "title": title,
+                                  "link": link
+                              })
+
+                  except Exception as e:
+                      print(f"RSS采集失败: {url}")
+                      print(e)
+
+          # =========================
+          # 去重
+          # =========================
+
+          unique_news = []
+          seen = set()
+
+          for news in all_news:
+
+              key = news["title"]
+
+              if key not in seen:
+                  seen.add(key)
+                  unique_news.append(news)
+
+          # =========================
+          # 最多推送20条
+          # =========================
+
+          unique_news = unique_news[:20]
+
+          # =========================
+          # 生成钉钉消息
+          # =========================
+
+          now = datetime.now(
+              timezone(timedelta(hours=8))
+          ).strftime("%Y-%m-%d %H:%M")
+
+          content = f"【领航智库·每日资讯】\n\n"
+          content += f"更新时间：{now}\n\n"
+
+          if not unique_news:
+
+              content += "暂未采集到新的资讯。"
+
+          else:
+
+              current_category = ""
+
+              for i, news in enumerate(unique_news, 1):
+
+                  if news["category"] != current_category:
+
+                      current_category = news["category"]
+
+                      content += f"\n【{current_category}】\n"
+
+                  content += f"{i}. {news['title']}\n"
+                  content += f"{news['link']}\n\n"
+
+          # =========================
+          # 推送钉钉
+          # =========================
 
           message = {
               "msgtype": "text",
               "text": {
-                  "content": "【领航智库自动化测试】\n\nGitHub Actions 云端运行成功！\n\n这意味着以后即使电脑关机，也可以由 GitHub 云端自动执行资讯采集和推送。"
+                  "content": content
               }
           }
 
-          data = json.dumps(message).encode("utf-8")
+          data = json.dumps(
+              message,
+              ensure_ascii=False
+          ).encode("utf-8")
 
           request = urllib.request.Request(
               webhook,
               data=data,
-              headers={"Content-Type": "application/json"},
+              headers={
+                  "Content-Type": "application/json"
+              },
               method="POST"
           )
 
           with urllib.request.urlopen(request) as response:
+
               result = response.read().decode("utf-8")
+
+              print("钉钉推送结果：")
               print(result)
+
           PY
